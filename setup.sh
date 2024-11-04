@@ -77,7 +77,7 @@ install_pacman() {
     if [[ "$answer" == "y" ]]; then
         sudo pacman -Syu || true
     fi
-    sudo pacman -S --noconfirm --needed git gdb python which debuginfod curl
+    sudo pacman -S --noconfirm --needed git gdb python which debuginfod curl xxhash
     if ! grep -qs "^set debuginfod enabled on" ~/.gdbinit; then
         echo "set debuginfod enabled on" >> ~/.gdbinit
     fi
