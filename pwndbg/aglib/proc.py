@@ -10,8 +10,6 @@ import functools
 import sys
 from types import ModuleType
 from typing import Callable
-from typing import List
-from typing import Optional
 from typing import Tuple
 from typing import TypeVar
 
@@ -41,9 +39,6 @@ binary_vmmap: Tuple[pwndbg.lib.memory.Page, ...]
 
 def OnlyWhenRunning(func: Callable[P, T]) -> Callable[P, T | None]: ...
 def OnlyWhenQemuKernel(func: Callable[P, T]) -> Callable[P, T]: ...
-def OnlyWithArch(
-    arch_names: List[str],
-) -> Callable[[Callable[..., T]], Callable[..., Optional[T]]]: ...
 
 
 class module(ModuleType):
@@ -162,28 +157,6 @@ class module(ModuleType):
             return None
 
         return wrapper
-
-    def OnlyWithArch(
-        self, arch_names: List[str]
-    ) -> Callable[[Callable[P, T]], Callable[P, Optional[T]]]:
-        """Decorates function to work only with the specified archictectures."""
-        for arch in arch_names:
-            if arch not in pwndbg.aglib.arch_mod.ARCHS:
-                raise ValueError(
-                    f"OnlyWithArch used with unsupported arch={arch}. Must be one of {', '.join(arch_names)}"
-                )
-
-        def decorator(function: Callable[P, T]) -> Callable[P, Optional[T]]:
-            @functools.wraps(function)
-            def _OnlyWithArch(*a: P.args, **kw: P.kwargs) -> Optional[T]:
-                if pwndbg.aglib.arch.name in arch_names:
-                    return function(*a, **kw)
-                else:
-                    return None
-
-            return _OnlyWithArch
-
-        return decorator
 
 
 # To prevent garbage collection

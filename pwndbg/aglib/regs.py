@@ -24,6 +24,7 @@ import pwndbg.aglib.qemu
 import pwndbg.aglib.remote
 import pwndbg.aglib.typeinfo
 import pwndbg.lib.cache
+from pwndbg.commands import OnlyWithArch
 from pwndbg.dbg import EventType
 from pwndbg.lib.regs import BitFlags
 from pwndbg.lib.regs import RegisterSet
@@ -225,14 +226,14 @@ class module(ModuleType):
 
     @property
     @pwndbg.aglib.proc.OnlyWhenQemuKernel
-    @pwndbg.aglib.proc.OnlyWithArch(["i386", "x86-64"])
+    @OnlyWithArch(["i386", "x86-64"])
     @pwndbg.lib.cache.cache_until("stop")
     def idt(self) -> int:
         return get_qemu_register("IDT")
 
     @property
     @pwndbg.aglib.proc.OnlyWhenQemuKernel
-    @pwndbg.aglib.proc.OnlyWithArch(["i386", "x86-64"])
+    @OnlyWithArch(["i386", "x86-64"])
     @pwndbg.lib.cache.cache_until("stop")
     def idt_limit(self) -> int:
         return get_qemu_register("IDT_LIMIT")
