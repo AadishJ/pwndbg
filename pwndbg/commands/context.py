@@ -14,7 +14,9 @@ from typing import Dict
 from typing import List
 from typing import Optional
 from typing import Tuple
+from typing import TypeVar
 
+import unicorn as U
 from typing_extensions import ParamSpec
 
 import pwndbg
@@ -22,6 +24,7 @@ import pwndbg.aglib.arch
 import pwndbg.aglib.disasm
 import pwndbg.aglib.nearpc
 import pwndbg.aglib.regs
+import pwndbg.aglib.symbol
 import pwndbg.arguments
 import pwndbg.chain
 import pwndbg.color
@@ -42,12 +45,13 @@ from pwndbg.commands import CommandCategory
 if pwndbg.dbg.is_gdblib_available():
     import gdb
 
-    import pwndbg.gdblib.heap_tracking
+    import pwndbg.gdblib.ptmalloc2_tracking
     import pwndbg.gdblib.symbol
     import pwndbg.ghidra
 
 log = logging.getLogger(__name__)
 
+T = TypeVar("T")
 P = ParamSpec("P")
 
 theme.add_param("backtrace-prefix", "►", "prefix for current backtrace label")
@@ -309,7 +313,18 @@ def serve_context_history(function: Callable[P, List[str]]) -> Callable[P, List[
         # Add the current section to the history if it is not already there
         current_output = []
         if pwndbg.aglib.proc.alive:
-            current_output = function(*a, **kw)
+            # Do not reevaluate the expressions section because its content is not deterministic.
+            # Instead, reuse the last evaluated expression and rely on the other sections to deselect
+            # the history entry if the output changed.
+            # https://github.com/pwndbg/pwndbg/issues/2579
+            if (
+                section_name == "expressions"
+                and selected_history_index is not None
+                and len(context_history[section_name]) > 0
+            ):
+                current_output = context_history[section_name][-1]
+            else:
+                current_output = function(*a, **kw)
             if (
                 len(context_history[section_name]) == 0
                 or context_history[section_name][-1] != current_output
@@ -334,6 +349,8 @@ def serve_context_history(function: Callable[P, List[str]]) -> Callable[P, List[
 
 
 def history_handle_unchanged_contents() -> None:
+    if not context_history:
+        return
     longest_history = max(len(h) for h in context_history.values())
     for section_name, history in context_history.items():
         # Duplicate the last entry if it is the same as the previous one
@@ -687,10 +704,8 @@ def compact_regs(regs, width=None, target=sys.stdout):
     min_width = max(1, int(pwndbg.config.show_compact_regs_min_width))
     separation = max(1, int(pwndbg.config.show_compact_regs_separation))
 
-    if width is None:  # auto width. In case of stdout, it's better to use stdin (b/c GdbOutputFile)
-        _height, width = pwndbg.ui.get_window_size(
-            target=target if target != sys.stdout else sys.stdin
-        )
+    if width is None:
+        _height, width = pwndbg.ui.get_window_size(target)
 
     if columns > 0:
         # Adjust the minimum_width (column) according to the
@@ -761,14 +776,16 @@ def context_regs(target=sys.stdout, with_banner=True, width=None):
 
 @serve_context_history
 def context_heap_tracker(target=sys.stdout, with_banner=True, width=None):
-    if not pwndbg.gdblib.heap_tracking.is_enabled():
+    if not pwndbg.gdblib.ptmalloc2_tracking.is_enabled():
         return []
 
     banner = [pwndbg.ui.banner("heap tracker", target=target, width=width, extra="")]
 
-    if pwndbg.gdblib.heap_tracking.last_issue is not None:
-        info = [f"Detected the following potential issue: {pwndbg.gdblib.heap_tracking.last_issue}"]
-        pwndbg.gdblib.heap_tracking.last_issue = None
+    if pwndbg.gdblib.ptmalloc2_tracking.last_issue is not None:
+        info = [
+            f"Detected the following potential issue: {pwndbg.gdblib.ptmalloc2_tracking.last_issue}"
+        ]
+        pwndbg.gdblib.ptmalloc2_tracking.last_issue = None
     else:
         info = ["Nothing to report."]
 
@@ -851,6 +868,20 @@ disasm_lines = pwndbg.config.add_param(
 )
 
 
+def try_emulate_if_bug_disable(handler: Callable[[], T]) -> T:
+    try:
+        return handler()
+    except U.UcError as e:
+        print(
+            message.warn(
+                f"Warning: Emulation context disabled due to a Unicorn error: \n{str(e)}\n"
+                "If you want to enable it again, use `set emulate on`."
+            )
+        )
+        pwndbg.config.emulate.value = "off"
+        return handler()
+
+
 @serve_context_history
 def context_disasm(target=sys.stdout, with_banner=True, width=None):
     flavor = pwndbg.dbg.x86_disassembly_flavor()
@@ -863,10 +894,12 @@ def context_disasm(target=sys.stdout, with_banner=True, width=None):
     if cs is not None and cs.syntax != syntax:
         pwndbg.lib.cache.clear_caches()
 
-    result = pwndbg.aglib.nearpc.nearpc(
-        lines=disasm_lines // 2,
-        emulate=bool(not pwndbg.config.emulate == "off"),
-        use_cache=True,
+    result = try_emulate_if_bug_disable(
+        lambda: pwndbg.aglib.nearpc.nearpc(
+            lines=disasm_lines // 2,
+            emulate=bool(not pwndbg.config.emulate == "off"),
+            use_cache=True,
+        )
     )
 
     # Note: we must fetch emulate value again after disasm since
@@ -1060,7 +1093,7 @@ def context_backtrace(with_banner=True, target=sys.stdout, width=None):
         prefix = bt_prefix if frame == this_frame else " " * len(bt_prefix)
         prefix = f" {c.prefix(prefix)}"
         addrsz = c.address(pwndbg.ui.addrsz(frame.pc()))
-        symbol = c.symbol(pwndbg.dbg.selected_inferior().symbol_name_at_address(int(frame.pc())))
+        symbol = c.symbol(pwndbg.aglib.symbol.resolve_addr(int(frame.pc())))
         if symbol:
             addrsz = addrsz + " " + symbol
         line = map(str, (prefix, c.frame_label("%s%i" % (backtrace_frame_label, i)), addrsz))
@@ -1174,7 +1207,7 @@ def context_threads(with_banner=True, target=sys.stdout, width=None):
             pc = gdb.selected_frame().pc()
 
             pc_colored = M.get(pc)
-            symbol = pwndbg.gdblib.symbol.get(pc)
+            symbol = pwndbg.aglib.symbol.resolve_addr(int(pc))
 
             line += f"{pc_colored}"
             if symbol:

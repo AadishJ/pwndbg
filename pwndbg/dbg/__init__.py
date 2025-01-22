@@ -11,6 +11,7 @@ from typing import Awaitable
 from typing import Callable
 from typing import Coroutine
 from typing import Generator
+from typing import Iterator
 from typing import List
 from typing import Literal
 from typing import Sequence
@@ -155,7 +156,44 @@ class Registers:
         raise NotImplementedError()
 
 
+class SymbolLookupType(Enum):
+    """
+    Enum representing types of symbol lookups for filtering symbol searches.
+
+    Attributes:
+    - ANY: Represents searching for any symbol type (default).
+    - FUNCTION: Represents searching specifically for function symbols.
+    - VARIABLE: Represents searching specifically for variable symbols.
+    """
+
+    ANY = 1
+    FUNCTION = 2
+    VARIABLE = 3
+
+
 class Frame:
+    def lookup_symbol(
+        self,
+        name: str,
+        *,
+        type: SymbolLookupType = SymbolLookupType.ANY,
+    ) -> Value | None:
+        """
+        Looks up and returns the address of a symbol in current frame by its name.
+
+        Parameters:
+        - name (str): The name of the symbol to look up.
+        - type (SymbolLookupType, optional): The type of symbol to search for. Defaults
+          to SymbolLookupType.ANY.
+
+        Returns:
+        - pwndbg.dbg_mod.Value | None: The value of the symbol if found, or None if not found.
+
+        Raises:
+        - pwndbg.dbg_mod.Error: If symbol name contains invalid characters
+        """
+        raise NotImplementedError()
+
     def evaluate_expression(self, expression: str, lock_scheduler: bool = False) -> Value:
         """
         Evaluate the given expression in the context of this frame, and
@@ -225,7 +263,8 @@ class Frame:
 
 
 class Thread:
-    def bottom_frame(self) -> Frame:
+    @contextlib.contextmanager
+    def bottom_frame(self) -> Iterator[Frame]:
         """
         Frame at the bottom of the call stack for this thread.
         """
@@ -252,12 +291,6 @@ class MemoryMap:
     def is_qemu(self) -> bool:
         """
         Returns whether this memory map was generated from a QEMU target.
-        """
-        raise NotImplementedError()
-
-    def has_reliable_perms(self) -> bool:
-        """
-        Returns whether the permissions in this memory map are reliable.
         """
         raise NotImplementedError()
 
@@ -372,7 +405,7 @@ class Process:
         """
         raise NotImplementedError()
 
-    def send_remote(self, packet: str) -> str:
+    def send_remote(self, packet: str) -> bytes:
         """
         Sends the given packet to the GDB remote debugging protocol server.
         Should only be called if `is_remote()` is true.
@@ -410,11 +443,31 @@ class Process:
         """
         raise NotImplementedError()
 
-    def symbol_address_from_name(self, name: str, prefer_static: bool = False) -> int | None:
+    def lookup_symbol(
+        self,
+        name: str,
+        *,
+        prefer_static: bool = False,
+        type: SymbolLookupType = SymbolLookupType.ANY,
+        objfile_endswith: str | None = None,
+    ) -> Value | None:
         """
-        Returns the address of a symbol, given its name. Optionally, the user
-        may specify that they want to prioritize symbols in the static block, if
-        supported by the debugger.
+        Looks up and returns the address of a symbol by its name.
+
+        Parameters:
+        - name (str): The name of the symbol to look up.
+        - prefer_static (bool, optional): If True, prioritize symbols in the static block,
+          if supported by the debugger. Defaults to False.
+        - type (SymbolLookupType, optional): The type of symbol to search for. Defaults
+          to SymbolLookupType.ANY.
+        - objfile_endswith (str | None, optional): If specified, limits the search to the
+          first object file whose name ends with the provided string.
+
+        Returns:
+        - pwndbg.dbg_mod.Value | None: The value of the symbol if found, or None if not found.
+
+        Raises:
+        - pwndbg.dbg_mod.Error: If no object file matching the `objfile_endswith` pattern is found.
         """
         raise NotImplementedError()
 
@@ -437,7 +490,6 @@ class Process:
         self,
         location: BreakpointLocation | WatchpointLocation,
         stop_handler: Callable[[StopPoint], bool] | None = None,
-        one_shot: bool = False,
         internal: bool = False,
     ) -> StopPoint:
         """
@@ -453,11 +505,6 @@ class Process:
         as a signal to stop, and a return value of `False` being interpreted as
         a signal to continue execution. The extent of the actions that may be
         taken during the stop handler is determined by the debugger.
-
-        Breakpoints and watchpoints marked as `one_shot` are removed after they
-        are first triggered. For the purposes of `one_shot`, a breakpoint or
-        watchpoint that has a stop handler is only considered to be triggered
-        when its stop handler returns `True`.
 
         Marking a breakpoint or watchpoint as `internal` hints to the
         implementation that the created breakpoint or watchpoint should not be
@@ -547,6 +594,7 @@ class TypeCode(Enum):
     Broad categories of types.
     """
 
+    INVALID = -1
     POINTER = 1
     ARRAY = 2
     STRUCT = 3
@@ -554,6 +602,8 @@ class TypeCode(Enum):
     UNION = 5
     INT = 6
     ENUM = 7
+    FUNC = 8
+    BOOL = 9
 
 
 class TypeField:
@@ -590,10 +640,46 @@ class Type:
     """
 
     @property
+    def name_identifier(self) -> str | None:
+        """
+        Returns the identifier of this type, eg:
+        - someStructName
+        - someEnumName
+        - someTypedefName
+
+        Returns None if the type is anonymous or does not have a name, such as:
+        - Anonymous structs
+        - Anonymous Typedefs
+        - Basic types like char[], void, etc.
+        """
+        raise NotImplementedError()
+
+    @property
+    def name_to_human_readable(self) -> str:
+        """
+        Returns the human friendly name of this type, eg:
+        - char [16]
+        - int
+        - char *
+        - void *
+        - fooStructName
+        - barEnumName
+        - barTypedefName
+
+        This function is not standardized, may return different names in gdb/lldb, eg:
+        gdb: `char [16]` or `char [50]` or `struct {...}`
+        lldb: `char[16]` or `char[]`    or `(anonymous struct)`
+
+        You should not use this function. Only for human eyes.
+        """
+        raise NotImplementedError()
+
+    @property
     def sizeof(self) -> int:
         """
         The size of this type, in bytes.
         """
+        raise NotImplementedError()
 
     @property
     def alignof(self) -> int:
@@ -609,7 +695,19 @@ class Type:
         """
         raise NotImplementedError()
 
-    def fields(self) -> List[TypeField] | None:
+    def func_arguments(self) -> List[Type] | None:
+        """
+        Returns a list of function arguments type.
+
+        Returns:
+            List[Type] | None: The function arguments type, or None if debug information is missing.
+
+        Raises:
+            TypeError: If called on an unsupported type.
+        """
+        raise NotImplementedError()
+
+    def fields(self) -> List[TypeField]:
         """
         List of all fields in this type, if it is a structured type.
         """
@@ -664,6 +762,80 @@ class Type:
         # if there is a better debugger-specific way to do this.
         return [field.name for field in self.fields()]
 
+    def enum_member(self, field_name: str) -> int | None:
+        """
+        Retrieve the integer value of an enum member.
+
+        It returns:
+        - integer value, when found field
+        - returns None, If the field does not exist
+        """
+        if self.code != TypeCode.ENUM:
+            raise TypeError("only enum supported")
+
+        return next((f.enumval for f in self.fields() if f.name == field_name), None)
+
+    def _offsetof(
+        self, field_name: str, *, base_offset_bits: int = 0, nested_cyclic_types: List[Type] = None
+    ) -> int | None:
+        NESTED_TYPES = (TypeCode.STRUCT, TypeCode.UNION)
+        struct_type = self
+        if nested_cyclic_types is None:
+            nested_cyclic_types = []
+
+        if struct_type.code == TypeCode.TYPEDEF:
+            struct_type = struct_type.strip_typedefs()
+
+        if struct_type.code not in NESTED_TYPES:
+            return None
+        elif struct_type in nested_cyclic_types:
+            return None
+
+        # note: lldb.SBType and gdb.Type dont support Sets
+        nested_cyclic_types.append(struct_type)
+
+        for field in struct_type.fields():
+            field_offset_bits = base_offset_bits + field.bitpos
+
+            if field.name == field_name:
+                if field_offset_bits % 8 != 0:
+                    # Possible bit-fields, misaligned struct, or unexpected alignment
+                    # This case is not supported because it introduces complexities
+                    # in handling non-byte-aligned or bit-level field offsets
+                    return None
+                return field_offset_bits // 8
+
+            nested_offset = field.type._offsetof(
+                field_name,
+                base_offset_bits=field_offset_bits,
+                nested_cyclic_types=nested_cyclic_types,
+            )
+            if nested_offset is not None:
+                return nested_offset
+
+        return None
+
+    def offsetof(self, field_name: str) -> int | None:
+        """
+        Calculate the byte offset of a field within a struct or union.
+
+        This method recursively traverses nested structures and unions, and it computes the
+        byte-aligned offset for the specified field.
+
+        It returns:
+        - offset in bytes if found
+        - None if the field doesn't exist or if an unsupported alignment/bit-field is encountered
+        """
+        if self.code == TypeCode.POINTER:
+            return self.target()._offsetof(field_name)
+        return self._offsetof(field_name)
+
+    def __eq__(self, rhs: object) -> bool:
+        """
+        Returns True if types are the same
+        """
+        raise NotImplementedError()
+
 
 class Value:
     """
@@ -709,13 +881,30 @@ class Value:
         raise NotImplementedError()
 
     # The intent of this function has a great deal of overlap with that of
-    # `pwndbg.gdblib.memory.string()`. It probably makes sense to take this
+    # `pwndbg.aglib.memory.string()`. It probably makes sense to take this
     # functionality out of the debugger API.
     #
     # TODO: Move to single, common string function.
     def string(self) -> str:
         """
         If this value is a string, then this method converts it to a Python string.
+        """
+        raise NotImplementedError()
+
+    def value_to_human_readable(self) -> str:
+        """
+        Converts a Value to a human-readable string representation.
+
+        The format is similar to what is produced by the `str()` function for gdb.Value,
+        displaying nested fields and pointers in a user-friendly way.
+
+        **Usage Notes:**
+        - This function is intended solely for displaying results to the user.
+        - The output format may differ between debugger implementations (e.g., GDB vs LLDB),
+          as each debugger may format values differently. For instance:
+            - GDB might produce: '{\n  value = 0,\n  inner = {\n    next = 0x555555558098 <inner_a_node_b+8>\n  }\n}'
+            - LLDB might produce: '(inner_a_node) *$PWNDBG_CREATED_VALUE_0 = {\n  value = 0\n  inner = {\n    next = 0x0000555555558098\n  }\n}'
+        - As such, this function should not be relied upon for parsing or programmatic use.
         """
         raise NotImplementedError()
 
@@ -897,6 +1086,24 @@ class Debugger:
         Sets up the given function to be called when an event of the given type
         gets fired. Returns a callable that corresponds to the wrapped function.
         This function my be used as a decorator.
+        """
+        raise NotImplementedError()
+
+    def suspend_events(self, ty: EventType) -> None:
+        """
+        Suspend delivery of all events of the given type until it is resumed
+        through a call to `resume_events`.
+
+        Events triggered during a suspension will be ignored, and will not be
+        delived, even after delivery is resumed.
+        """
+        raise NotImplementedError()
+
+    def resume_events(self, ty: EventType) -> None:
+        """
+        Resume the delivery of all events of the given type, if previously
+        suspeded through a call to `suspend_events`. Does nothing if the
+        delivery has not been previously suspeded.
         """
         raise NotImplementedError()
 

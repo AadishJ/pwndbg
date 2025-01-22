@@ -42,9 +42,11 @@ def get_register(
 ) -> pwndbg.dbg_mod.Value | None:
     if frame is None:
         frame = pwndbg.dbg.selected_frame()
-    assert (
-        frame is not None
-    ), "pwndbg.dbg.selected_frame() should never return None when marked with @OnlyWhenRunning"
+        if frame is None:
+            # `read_reg` will return None when it catches this exception. This
+            # mirrors how a `gdb.error` causes `read_reg` to return `None` in
+            # gdblib when no frame is selected.
+            raise pwndbg.dbg_mod.Error("No currently selected frame to read registers from")
 
     regs = regs_in_frame(frame)
 
@@ -248,7 +250,6 @@ class module(ModuleType):
     def gsbase(self) -> int:
         return self._fs_gs_helper("gs_base", ARCH_GET_GS)
 
-    @pwndbg.lib.cache.cache_until("stop")
     def _fs_gs_helper(self, regname: str, which: int) -> int:
         """Supports fetching based on segmented addressing, a la fs:[0x30].
         Requires ptrace'ing the child directory if i386."""

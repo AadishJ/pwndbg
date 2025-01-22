@@ -9,6 +9,7 @@ from typing import Any
 from typing import Callable
 from typing import Dict
 from typing import List
+from typing import Literal
 from typing import Optional
 from typing import Set
 from typing import Tuple
@@ -17,21 +18,15 @@ from typing import TypeVar
 from typing_extensions import ParamSpec
 
 import pwndbg.aglib.heap
+import pwndbg.aglib.kernel
 import pwndbg.aglib.proc
 import pwndbg.aglib.qemu
+import pwndbg.aglib.regs
 import pwndbg.exception
 from pwndbg.aglib.heap.ptmalloc import DebugSymsHeap
 from pwndbg.aglib.heap.ptmalloc import GlibcMemoryAllocator
 from pwndbg.aglib.heap.ptmalloc import HeuristicHeap
 from pwndbg.aglib.heap.ptmalloc import SymbolUnresolvableError
-
-# These aren't available under LLDB, and we can't get rid of them until all of
-# this functionality has been ported to the Debugger API.
-#
-# TODO: Replace these with uses of the Debugger API.
-if pwndbg.dbg.is_gdblib_available():
-    import pwndbg.gdblib.kernel
-    import pwndbg.gdblib.regs
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +41,8 @@ class CommandCategory(str, Enum):
     START = "Start"
     NEXT = "Step/Next/Continue"
     CONTEXT = "Context"
-    HEAP = "Heap"
+    PTMALLOC2 = "GLibc ptmalloc2 Heap"
+    JEMALLOC = "jemalloc Heap"
     BREAKPOINT = "Breakpoint"
     MEMORY = "Memory"
     STACK = "Stack"
@@ -233,7 +229,7 @@ def fix(
         # no debugger-agnostic architecture functions. Those will come later.
         #
         # TODO: Port architecutre functions and `pwndbg.gdblib.regs.fix` to debugger-agnostic API and remove this.
-        arg = pwndbg.gdblib.regs.fix(arg)
+        arg = pwndbg.aglib.regs.fix(arg)
         return target.evaluate_expression(arg)
     except Exception as e:
         ex = e
@@ -274,6 +270,23 @@ def fix_int(*a, **kw) -> int:
 
 def fix_int_reraise(*a, **kw) -> int:
     return fix_int(*a, reraise=True, **kw)
+
+
+def OnlyWhenLocal(function: Callable[P, T]) -> Callable[P, Optional[T]]:
+    @functools.wraps(function)
+    def _OnlyWhenLocal(*a: P.args, **kw: P.kwargs) -> Optional[T]:
+        if not pwndbg.aglib.remote.is_remote():
+            return function(*a, **kw)
+
+        msg = f'The "remote" target does not support "{function.__name__}".'
+
+        if pwndbg.dbg.is_gdblib_available():
+            msg += ' Try "help target" or "continue".'
+
+        log.error(msg)
+        return None
+
+    return _OnlyWhenLocal
 
 
 def OnlyWithFile(function: Callable[P, T]) -> Callable[P, Optional[T]]:
@@ -344,10 +357,36 @@ def OnlyWithArch(arch_names: List[str]) -> Callable[[Callable[P, T]], Callable[P
     return decorator
 
 
+def OnlyWithDbg(
+    *dbg_names: Literal["lldb", "gdb"],
+) -> Callable[[Callable[P, T]], Callable[P, Optional[T]]]:
+    """Decorates function to work only with the specified debugger."""
+
+    def decorator(function: Callable[P, T]) -> Callable[P, Optional[T]]:
+        @functools.wraps(function)
+        def _OnlyWithDbg(*a: P.args, **kw: P.kwargs) -> Optional[T]:
+            if pwndbg.dbg.is_gdblib_available():
+                if "gdb" in dbg_names:
+                    return function(*a, **kw)
+            else:
+                if "lldb" in dbg_names:
+                    return function(*a, **kw)
+
+            dbg_str = ", ".join(dbg_names)
+            log.error(
+                f"{function.__name__}: This command may only be run on the {dbg_str} debugger(s)"
+            )
+            return None
+
+        return _OnlyWithDbg
+
+    return decorator
+
+
 def OnlyWithKernelDebugSyms(function: Callable[P, T]) -> Callable[P, Optional[T]]:
     @functools.wraps(function)
     def _OnlyWithKernelDebugSyms(*a: P.args, **kw: P.kwargs) -> Optional[T]:
-        if pwndbg.gdblib.kernel.has_debug_syms():
+        if pwndbg.aglib.kernel.has_debug_syms():
             return function(*a, **kw)
         else:
             log.error(
@@ -361,7 +400,7 @@ def OnlyWithKernelDebugSyms(function: Callable[P, T]) -> Callable[P, Optional[T]
 def OnlyWhenPagingEnabled(function: Callable[P, T]) -> Callable[P, Optional[T]]:
     @functools.wraps(function)
     def _OnlyWhenPagingEnabled(*a: P.args, **kw: P.kwargs) -> Optional[T]:
-        if pwndbg.gdblib.kernel.paging_enabled():
+        if pwndbg.aglib.kernel.paging_enabled():
             return function(*a, **kw)
         else:
             log.error(f"{function.__name__}: This command may only be run when paging is enabled.")
@@ -611,14 +650,6 @@ class ArgparsedCommand:
         )
 
 
-# We use a 64-bit max value literal here instead of pwndbg.aglib.arch.current
-# as realistically its ok to pull off the biggest possible type here
-# We cache its value type which is 'unsigned long long'
-_mask = 0xFFFFFFFFFFFFFFFF
-_mask_val_type: pwndbg.dbg_mod.Type = None
-_mask_val_proc: pwndbg.dbg_mod.Process = None
-
-
 def sloppy_gdb_parse(s: str) -> int | str:
     """
     This function should be used as ``argparse.ArgumentParser`` .add_argument method's `type` helper.
@@ -638,21 +669,9 @@ def sloppy_gdb_parse(s: str) -> int | str:
 
     try:
         val = target.evaluate_expression(s)
-        # We can't just return int(val) because GDB may return:
-        # "Python Exception <class 'gdb.error'> Cannot convert value to long."
-        # e.g. for:
-        # pwndbg> pi int(gdb.parse_and_eval('__libc_start_main'))
-        #
-        # Here, the _mask_val.type should be `unsigned long long`
-        global _mask_val_type
-        global _mask_val_proc
-
-        i = pwndbg.dbg.selected_inferior()
-        if not _mask_val_type or _mask_val_proc != i:
-            _mask_val_type = i.create_value(_mask).type
-            _mask_val_proc = i
-
-        return int(val.cast(_mask_val_type))
+        if val.type.code == pwndbg.dbg_mod.TypeCode.FUNC:
+            return int(val.address)
+        return int(val)
     except (TypeError, pwndbg.dbg_mod.Error):
         return s
 
@@ -686,54 +705,30 @@ def load_commands() -> None:
 
     if pwndbg.dbg.is_gdblib_available():
         import pwndbg.commands.ai
-        import pwndbg.commands.argv
-        import pwndbg.commands.aslr
-        import pwndbg.commands.asm
         import pwndbg.commands.attachp
-        import pwndbg.commands.auxv
-        import pwndbg.commands.binder
-        import pwndbg.commands.binja
+        import pwndbg.commands.binja_functions
         import pwndbg.commands.branch
         import pwndbg.commands.cymbol
-        import pwndbg.commands.dt
-        import pwndbg.commands.gdt
-        import pwndbg.commands.ghidra
-        import pwndbg.commands.godbg
         import pwndbg.commands.got
         import pwndbg.commands.got_tracking
-        import pwndbg.commands.heap_tracking
+        import pwndbg.commands.ptmalloc2_tracking
         import pwndbg.commands.ida
         import pwndbg.commands.ignore
-        import pwndbg.commands.integration
         import pwndbg.commands.ipython_interactive
-        import pwndbg.commands.kbase
-        import pwndbg.commands.kchecksec
-        import pwndbg.commands.kcmdline
-        import pwndbg.commands.kconfig
         import pwndbg.commands.killthreads
-        import pwndbg.commands.klookup
-        import pwndbg.commands.kversion
-        import pwndbg.commands.linkmap
-        import pwndbg.commands.memoize
-        import pwndbg.commands.misc
-        import pwndbg.commands.onegadget
-        import pwndbg.commands.pcplist
         import pwndbg.commands.peda
-        import pwndbg.commands.plist
-        import pwndbg.commands.procinfo
-        import pwndbg.commands.radare2
         import pwndbg.commands.reload
-        import pwndbg.commands.rizin
-        import pwndbg.commands.rop
         import pwndbg.commands.ropper
         import pwndbg.commands.segments
         import pwndbg.commands.shell
-        import pwndbg.commands.slab
-        import pwndbg.commands.start
-        import pwndbg.commands.tips
-        import pwndbg.commands.tls
         import pwndbg.commands.version
 
+    import pwndbg.commands.argv
+    import pwndbg.commands.aslr
+    import pwndbg.commands.asm
+    import pwndbg.commands.auxv
+    import pwndbg.commands.binder
+    import pwndbg.commands.binja
     import pwndbg.commands.canary
     import pwndbg.commands.checksec
     import pwndbg.commands.comments
@@ -743,25 +738,55 @@ def load_commands() -> None:
     import pwndbg.commands.cyclic
     import pwndbg.commands.dev
     import pwndbg.commands.distance
+    import pwndbg.commands.dt
     import pwndbg.commands.dumpargs
     import pwndbg.commands.elf
     import pwndbg.commands.flags
-    import pwndbg.commands.heap
+    import pwndbg.commands.gdt
+    import pwndbg.commands.ghidra
+    import pwndbg.commands.godbg
+    import pwndbg.commands.hex2ptr
     import pwndbg.commands.hexdump
+    import pwndbg.commands.hijack_fd
+    import pwndbg.commands.integration
+    import pwndbg.commands.jemalloc
+    import pwndbg.commands.kbase
+    import pwndbg.commands.kchecksec
+    import pwndbg.commands.kcmdline
+    import pwndbg.commands.kconfig
+    import pwndbg.commands.klookup
+    import pwndbg.commands.kversion
     import pwndbg.commands.leakfind
+    import pwndbg.commands.linkmap
+    import pwndbg.commands.memoize
+    import pwndbg.commands.misc
     import pwndbg.commands.mmap
     import pwndbg.commands.mprotect
     import pwndbg.commands.nearpc
     import pwndbg.commands.next
+    import pwndbg.commands.onegadget
     import pwndbg.commands.p2p
     import pwndbg.commands.patch
+    import pwndbg.commands.pcplist
     import pwndbg.commands.pie
+    import pwndbg.commands.plist
     import pwndbg.commands.probeleak
+    import pwndbg.commands.procinfo
+    import pwndbg.commands.profiler
+    import pwndbg.commands.ptmalloc2
+    import pwndbg.commands.radare2
     import pwndbg.commands.retaddr
+    import pwndbg.commands.rizin
+    import pwndbg.commands.rop
     import pwndbg.commands.search
     import pwndbg.commands.sigreturn
+    import pwndbg.commands.slab
     import pwndbg.commands.spray
+    import pwndbg.commands.start
+    import pwndbg.commands.strings
     import pwndbg.commands.telescope
+    import pwndbg.commands.tips
+    import pwndbg.commands.tls
     import pwndbg.commands.valist
     import pwndbg.commands.vmmap
     import pwndbg.commands.windbg

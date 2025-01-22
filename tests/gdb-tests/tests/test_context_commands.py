@@ -5,6 +5,8 @@ import re
 import gdb
 import pytest
 
+import pwndbg.aglib.memory
+import pwndbg.aglib.regs
 import pwndbg.commands
 import pwndbg.commands.canary
 import tests
@@ -326,7 +328,7 @@ def test_context_disasm_proper_render_on_mem_change_issue_1818(start_binary, pat
         gdb.execute("patch $rip nop;nop;nop;nop;nop", to_string=True)
     else:
         # Do the same, but through write API
-        pwndbg.gdblib.memory.write(pwndbg.gdblib.regs.rip, b"\x90" * 5)
+        pwndbg.aglib.memory.write(pwndbg.aglib.regs.rip, b"\x90" * 5)
 
     # Actual test: we expect the read memory to be different now ;)
     # (and not e.g. returned incorrectly from a not cleared cache)
@@ -490,6 +492,28 @@ def test_context_history_prev_next(start_binary):
     third_ctx = gdb.execute("ctx", to_string=True)
     assert history_ctx != third_ctx
     assert "(history " not in third_ctx
+
+    # Check if cwatch expressions are also stored in the history
+    gdb.execute("cwatch $rip")
+    gdb.execute("cwatch execute 'p/z $rsp'")
+    fourth_ctx = gdb.execute("ctx", to_string=True)
+    assert "1: $rip = " in fourth_ctx
+    assert "2: p/z $rsp\n$1 = 0x" in fourth_ctx
+
+    # The next context shows a different output variable $2
+    gdb.execute("si")
+    fifth_ctx = gdb.execute("ctx", to_string=True)
+    assert "1: $rip = " in fifth_ctx
+    assert "2: p/z $rsp\n$2 = 0x" in fifth_ctx
+
+    # Check that the expression section shows the old gdb variable $1 again.
+    gdb.execute("contextprev")
+    history_ctx = gdb.execute("ctx", to_string=True)
+    assert "1: $rip = " in history_ctx
+    assert "2: p/z $rsp\n$1 = 0x" in history_ctx
+
+    gdb.execute("cunwatch 2")
+    gdb.execute("cunwatch 1")
 
 
 def test_context_history_search(start_binary):

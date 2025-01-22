@@ -27,7 +27,6 @@ pid: int
 tid: int
 thread_id: int
 alive: bool
-thread_is_stopped: bool
 stopped_with_signal: bool
 exe: str | None
 binary_base_addr: int
@@ -44,16 +43,10 @@ def OnlyWhenQemuKernel(func: Callable[P, T]) -> Callable[P, T]: ...
 class module(ModuleType):
     @property
     def pid(self) -> int:
-        # QEMU usermode emulation always returns 42000 for some reason.
-        # In any case, we can't use the info.
-        if pwndbg.aglib.qemu.is_qemu_usermode():
-            return pwndbg.aglib.qemu.pid()
         return pwndbg.dbg.selected_inferior().pid()
 
     @property
     def tid(self) -> int:
-        if pwndbg.aglib.qemu.is_qemu_usermode():
-            return pwndbg.aglib.qemu.pid()
         return pwndbg.dbg.selected_thread().ptid()
 
     @property
@@ -109,18 +102,18 @@ class module(ModuleType):
         """
         Dump .data section of current process's ELF file
         """
-        import pwndbg.gdblib.elf
+        import pwndbg.aglib.elf
 
-        return pwndbg.gdblib.elf.dump_section_by_name(self.exe, ".data", try_local_path=True)
+        return pwndbg.aglib.elf.dump_section_by_name(self.exe, ".data", try_local_path=True)
 
     @pwndbg.lib.cache.cache_until("start", "objfile")
     def dump_relocations_by_section_name(self, section_name: str) -> Tuple[Relocation, ...] | None:
         """
         Dump relocations of a section by section name of current process's ELF file
         """
-        import pwndbg.gdblib.elf
+        import pwndbg.aglib.elf
 
-        return pwndbg.gdblib.elf.dump_relocations_by_section_name(
+        return pwndbg.aglib.elf.dump_relocations_by_section_name(
             self.exe, section_name, try_local_path=True
         )
 

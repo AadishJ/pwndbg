@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import cProfile
 import hashlib
+import importlib.abc
 import logging
 import os
 import shutil
@@ -18,6 +19,17 @@ from typing import Tuple
 import gdb
 
 
+# Fix gdb readline bug: https://github.com/pwndbg/pwndbg/issues/2232#issuecomment-2542564965
+class GdbRemoveReadlineFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "readline":
+            raise ImportError("readline module disabled under GDB")
+        return None
+
+
+sys.meta_path.insert(0, GdbRemoveReadlineFinder())
+
+
 def hash_file(file_path: str | Path) -> str:
     with open(file_path, "rb") as f:
         file_hash = hashlib.sha256()
@@ -29,12 +41,14 @@ def hash_file(file_path: str | Path) -> str:
     return file_hash.hexdigest()
 
 
-def run_poetry_install(poetry_path: os.PathLike[str], dev: bool = False) -> Tuple[str, str, int]:
+def run_poetry_install(
+    poetry_path: os.PathLike[str], src_root: Path, dev: bool = False
+) -> Tuple[str, str, int]:
     command: List[str] = [str(poetry_path), "install"]
     if dev:
         command.extend(("--with", "dev"))
     logging.debug(f"Updating deps with command: {' '.join(command)}")
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(command, capture_output=True, text=True, cwd=src_root)
     return result.stdout.strip(), result.stderr.strip(), result.returncode
 
 
@@ -83,7 +97,7 @@ def update_deps(src_root: Path, venv_path: Path) -> None:
             return
 
         dev_mode = is_dev_mode(venv_path)
-        stdout, stderr, return_code = run_poetry_install(poetry_path, dev=dev_mode)
+        stdout, stderr, return_code = run_poetry_install(poetry_path, src_root, dev=dev_mode)
         if return_code == 0:
             poetry_lock_hash_path.write_text(current_hash)
 

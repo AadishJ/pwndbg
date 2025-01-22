@@ -8,6 +8,7 @@ import pwndbg.aglib.arch
 import pwndbg.aglib.typeinfo
 import pwndbg.lib.cache
 import pwndbg.lib.memory
+from pwndbg.dbg import EventType
 from pwndbg.dbg import TypeCode
 from pwndbg.lib.memory import PAGE_SIZE
 
@@ -115,9 +116,17 @@ def poke(address: int) -> bool:
     if c is None:
         return False
     try:
+        # Suspending mem_changed event during poke speeds up things when vmmaps are explored
+        # (e.g. when stepping through remote processes run with QEMU)
+        # The suspension prevents the clearing of the disasm instruction cache
+        # by `aglib.disasm.clear_on_reg_mem_change`
+        pwndbg.dbg.suspend_events(EventType.MEMORY_CHANGED)
         write(address, c)
     except Exception:
         return False
+    finally:
+        pwndbg.dbg.resume_events(EventType.MEMORY_CHANGED)
+
     return True
 
 
@@ -341,6 +350,16 @@ def find_lower_boundary(addr: int, max_pages: int = 1024) -> int:
 def update_min_addr() -> None:
     global MMAP_MIN_ADDR
     MMAP_MIN_ADDR = 0 if pwndbg.aglib.qemu.is_qemu_kernel() else 0x8000
+
+
+def fetch_struct_as_dictionary(
+    struct_name: str,
+    struct_address: int | pwndbg.dbg_mod.Value,
+    include_only_fields: Set[str] | None = None,
+    exclude_fields: Set[str] | None = None,
+) -> GdbDict:
+    fetched_struct = get_typed_pointer_value("struct " + struct_name, struct_address)
+    return pack_struct_into_dictionary(fetched_struct, include_only_fields, exclude_fields)
 
 
 def pack_struct_into_dictionary(

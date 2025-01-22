@@ -3,7 +3,9 @@ from __future__ import annotations
 import gdb
 import user
 
-import pwndbg.gdblib.symbol
+import pwndbg.aglib.symbol
+import pwndbg.color
+import pwndbg.dbg
 
 RISCV64_GRACEFUL_EXIT = """
     li a2, 30
@@ -296,7 +298,7 @@ REFERENCE_BINARY = user.binaries.get("reference-binary.riscv64.out")
 def test_riscv64_reference(qemu_start_binary):
     qemu_start_binary(REFERENCE_BINARY, "riscv64")
     gdb.execute("break 4")
-    assert pwndbg.gdblib.symbol.address("main") is not None
+    assert pwndbg.aglib.symbol.lookup_symbol("main") is not None
     gdb.execute("continue")
 
     gdb.execute("stepuntilasm jalr")
